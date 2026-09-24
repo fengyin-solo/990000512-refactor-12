@@ -120,25 +120,107 @@ export const useBoardStore = defineStore('board', () => {
     }
   }
 
+  // Renumber a column's cards so each local position matches its index.
+  function renumberPositions(list) {
+    list.forEach((card, i) => {
+      card.position = i
+    })
+  }
+
+  // Single state-update path for a card move, shared by drag-and-drop, the
+  // card menu and the detail dialog: optimistic local update (source column,
+  // target column, counts and positions), rollback snapshot on failure, and
+  // server-authoritative result on success.
   async function moveCard(cardId, targetColumnId, position) {
-    const res = await cardApi.move(cardId, targetColumnId, position)
-    // Remove card from old column and add to new column
+    targetColumnId = Number(targetColumnId)
+
+    // Locate the card in its current source column.
+    let sourceColumnId = null
+    let sourceIndex = -1
     let movedCard = null
     for (const colId in cards.value) {
       const idx = cards.value[colId].findIndex(c => c.id === cardId)
       if (idx !== -1) {
-        movedCard = cards.value[colId].splice(idx, 1)[0]
+        sourceColumnId = Number(colId)
+        sourceIndex = idx
+        movedCard = cards.value[colId][idx]
         break
       }
     }
-    if (movedCard) {
-      movedCard.column_id = targetColumnId
-      movedCard.position = position
-      if (!cards.value[targetColumnId]) cards.value[targetColumnId] = []
-      // Insert at position
-      cards.value[targetColumnId].splice(position, 0, movedCard)
+    if (!movedCard) {
+      throw new Error('Card not found')
     }
-    return res.data
+
+    const sameColumn = sourceColumnId === targetColumnId
+    const requestedPosition = Number.isFinite(Number(position)) ? Number(position) : null
+
+    // Snapshot both affected columns so the optimistic update can be undone.
+    const sourceSnapshot = [...cards.value[sourceColumnId]]
+    const targetExisted = Object.prototype.hasOwnProperty.call(cards.value, targetColumnId)
+    const targetSnapshot = targetExisted && !sameColumn ? [...cards.value[targetColumnId]] : null
+    const originalColumnId = movedCard.column_id
+    const originalPosition = movedCard.position
+    // Renumbering mutates shared card objects, so remember every old position.
+    const positionSnapshot = new Map()
+    const rememberPositions = list => list.forEach(c => positionSnapshot.set(c.id, c.position))
+    rememberPositions(sourceSnapshot)
+    if (targetSnapshot) rememberPositions(targetSnapshot)
+
+    // Optimistic update: remove from the source, insert at the (clamped)
+    // target position and renumber both columns the same way the server does.
+    const sourceList = cards.value[sourceColumnId]
+    sourceList.splice(sourceIndex, 1)
+    if (!cards.value[targetColumnId]) cards.value[targetColumnId] = []
+    const targetList = cards.value[targetColumnId]
+    let insertAt = requestedPosition === null ? targetList.length : requestedPosition
+    insertAt = Math.max(0, Math.min(insertAt, targetList.length))
+    targetList.splice(insertAt, 0, movedCard)
+    movedCard.column_id = targetColumnId
+    movedCard.position = insertAt
+    renumberPositions(sameColumn ? targetList : sourceList)
+    renumberPositions(targetList)
+
+    try {
+      const res = await cardApi.move(cardId, targetColumnId, insertAt)
+      // Trust the server result: the moved card lands at the server-assigned
+      // position (it may clamp a different index), so place it there before
+      // renumbering every other card's local position to match the order.
+      const updated = res.data
+      const finalList = cards.value[targetColumnId]
+      const currentIndex = finalList.findIndex(c => c.id === cardId)
+      const merged = { ...(currentIndex !== -1 ? finalList[currentIndex] : {}), ...updated }
+      if (currentIndex !== -1) finalList.splice(currentIndex, 1)
+      const serverPosition = Number.isFinite(Number(merged.position))
+        ? Math.max(0, Math.min(Number(merged.position), finalList.length))
+        : finalList.length
+      finalList.splice(serverPosition, 0, merged)
+      renumberPositions(finalList)
+      if (!sameColumn && cards.value[sourceColumnId]) {
+        renumberPositions(cards.value[sourceColumnId])
+      }
+      return updated
+    } catch (err) {
+      // Restore the pre-move state so callers can offer a clean retry.
+      const restorePositions = list => list.forEach(c => {
+        if (positionSnapshot.has(c.id)) c.position = positionSnapshot.get(c.id)
+      })
+      if (sameColumn) {
+        cards.value[sourceColumnId] = sourceSnapshot
+        restorePositions(sourceSnapshot)
+      } else {
+        cards.value[sourceColumnId] = sourceSnapshot
+        restorePositions(sourceSnapshot)
+        if (targetSnapshot) {
+          cards.value[targetColumnId] = targetSnapshot
+          restorePositions(targetSnapshot)
+        } else {
+          delete cards.value[targetColumnId]
+        }
+      }
+      movedCard.column_id = originalColumnId
+      movedCard.position = originalPosition
+      throw err
+    }
   }
 
   function clearBoard() {

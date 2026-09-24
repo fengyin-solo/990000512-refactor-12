@@ -1,5 +1,5 @@
 <template>
-  <div class="column">
+  <div class="column" :data-column-id="column.id">
     <div class="column-header">
       <div v-if="!isEditing" class="column-title" @dblclick="startEditing">
         <h3>{{ column.name }}</h3>
@@ -59,7 +59,6 @@ import { ref, nextTick } from 'vue'
 import { MoreFilled, Plus } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import TaskCard from './TaskCard.vue'
-import { cardApi } from '../api/index.js'
 
 const props = defineProps({
   column: { type: Object, required: true },
@@ -96,26 +95,30 @@ function handleCommand(command) {
   }
 }
 
-async function onCardDragEnd(evt) {
+function onCardDragEnd(evt) {
+  // SortableJS fires `end` only on the source list; resolve both columns
+  // from the drag event so cross-column drops use the real target column.
   const cardId = evt.item?.__draggable_context?.element?.id
-  const toColumnId = props.column.id
-  
-  // Find source column
-  const fromContext = evt.from.__draggable_context
-  const toContext = evt.to.__draggable_context
-  
   if (!cardId) return
-  
-  const newIndex = evt.newIndex
-  
-  // If moved to a different column, update via API
-  if (evt.from !== evt.to) {
-    try {
-      await cardApi.move(cardId, toColumnId, newIndex)
-    } catch (err) {
-      // Refresh would be needed here, but the store handles it
-    }
+
+  const fromColumn = evt.from?.closest('[data-column-id]')
+  const toColumn = evt.to?.closest('[data-column-id]')
+  const fromColumnId = fromColumn ? Number(fromColumn.dataset.columnId) : props.column.id
+  const toColumnId = toColumn ? Number(toColumn.dataset.columnId) : props.column.id
+
+  if (!toColumnId || fromColumnId === null) return
+
+  // Dropped back in place: nothing moved, skip the request.
+  if (evt.from === evt.to && evt.newIndex === evt.oldIndex) return
+
+  let newIndex = typeof evt.newIndex === 'number' ? evt.newIndex : evt.oldIndex
+  if (typeof newIndex !== 'number') {
+    newIndex = (props.cards || []).length
   }
+
+  // Same handler as the card menu and the detail dialog: the store owns the
+  // state update, including rollback and retry on failure.
+  emit('move-card', cardId, toColumnId, newIndex)
 }
 </script>
 

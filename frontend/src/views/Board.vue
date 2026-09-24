@@ -167,12 +167,37 @@ async function confirmDeleteCard(card) {
   }
 }
 
+// Unified post-move flow for every entry point (drag, card menu, detail
+// dialog): the store performs the optimistic update and rollback; here we
+// only own the success message and failure-retry interaction.
 async function handleMoveCard(cardId, targetColumnId, position) {
-  try {
-    await boardStore.moveCard(cardId, targetColumnId, position)
-    ElMessage.success('Card moved')
-  } catch (err) {
-    ElMessage.error('Failed to move card')
+  const runMove = () => boardStore.moveCard(cardId, targetColumnId, position)
+
+  while (true) {
+    try {
+      await runMove()
+      ElMessage.success('Card moved')
+      return
+    } catch (err) {
+      // store has already rolled back to the pre-move state
+    }
+
+    // offer another attempt against the rolled-back state
+    try {
+      await ElMessageBox.confirm(
+        'Moving the card failed. Retry?',
+        'Move Failed',
+        {
+          type: 'error',
+          confirmButtonText: 'Retry',
+          cancelButtonText: 'Cancel',
+          distinguishCancelAndClose: true
+        }
+      )
+    } catch (cancel) {
+      ElMessage.info('Move cancelled')
+      return
+    }
   }
 }
 
