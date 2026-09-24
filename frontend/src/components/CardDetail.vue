@@ -114,10 +114,10 @@ async function handleSave() {
     emit('updated', updated)
     ElMessage.success('Card updated')
 
-    // Handle move if target column selected
+    // Move through the same entry as drag & drop / card menu: the parent
+    // handler owns retry, rollback, counts and position reconciliation.
     if (moveTarget.value && moveTarget.value !== props.card.column_id) {
-      await boardStore.moveCard(props.card.id, moveTarget.value, 0)
-      ElMessage.success('Card moved')
+      emit('move', props.card.id, moveTarget.value, 0)
     }
 
     emit('update:visible', false)

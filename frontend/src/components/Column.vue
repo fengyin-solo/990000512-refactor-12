@@ -32,6 +32,7 @@
         group="cards"
         ghost-class="card-ghost"
         animation="200"
+        :data-column-id="column.id"
         @end="onCardDragEnd"
       >
         <template #item="{ element: card }">
@@ -59,7 +60,6 @@ import { ref, nextTick } from 'vue'
 import { MoreFilled, Plus } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import TaskCard from './TaskCard.vue'
-import { cardApi } from '../api/index.js'
 
 const props = defineProps({
   column: { type: Object, required: true },
@@ -96,26 +96,18 @@ function handleCommand(command) {
   }
 }
 
-async function onCardDragEnd(evt) {
+function onCardDragEnd(evt) {
+  // The end event always fires on the source column, so the real target
+  // column is read from the destination container, not from props.
+  const targetColumnId = Number(evt.to?.dataset?.columnId)
+  if (!targetColumnId || targetColumnId === props.column.id) return
+
   const cardId = evt.item?.__draggable_context?.element?.id
-  const toColumnId = props.column.id
-  
-  // Find source column
-  const fromContext = evt.from.__draggable_context
-  const toContext = evt.to.__draggable_context
-  
   if (!cardId) return
-  
-  const newIndex = evt.newIndex
-  
-  // If moved to a different column, update via API
-  if (evt.from !== evt.to) {
-    try {
-      await cardApi.move(cardId, toColumnId, newIndex)
-    } catch (err) {
-      // Refresh would be needed here, but the store handles it
-    }
-  }
+
+  // Same handler as the detail dialog and the card menu: the store performs
+  // the move, retries, and rolls both column lists back on failure.
+  emit('move-card', cardId, targetColumnId, evt.newIndex ?? 0)
 }
 </script>
 

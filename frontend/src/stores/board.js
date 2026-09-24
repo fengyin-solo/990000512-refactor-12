@@ -120,25 +120,93 @@ export const useBoardStore = defineStore('board', () => {
     }
   }
 
+  // Single state transition for moving a card.
+  // Both entry points (drag & drop and the detail dialog) go through this,
+  // so source column, target column, counts and positions can never diverge.
   async function moveCard(cardId, targetColumnId, position) {
-    const res = await cardApi.move(cardId, targetColumnId, position)
-    // Remove card from old column and add to new column
-    let movedCard = null
+    // Locate the card in whatever column the local state currently has it.
+    let sourceColumnId = null
+    let sourceIndex = -1
     for (const colId in cards.value) {
       const idx = cards.value[colId].findIndex(c => c.id === cardId)
       if (idx !== -1) {
-        movedCard = cards.value[colId].splice(idx, 1)[0]
+        sourceColumnId = colId
+        sourceIndex = idx
         break
       }
     }
-    if (movedCard) {
-      movedCard.column_id = targetColumnId
-      movedCard.position = position
-      if (!cards.value[targetColumnId]) cards.value[targetColumnId] = []
-      // Insert at position
-      cards.value[targetColumnId].splice(position, 0, movedCard)
+
+    // Snapshot every column before touching state so a failed move can be
+    // fully restored (including columns that did not previously exist in the map).
+    const snapshot = {}
+    const knownKeys = Object.keys(cards.value)
+    for (const colId of knownKeys) {
+      snapshot[colId] = cards.value[colId].map(c => ({ ...c }))
     }
-    return res.data
+    if (cards.value[targetColumnId] === undefined) {
+      cards.value[targetColumnId] = []
+    }
+
+    try {
+      // Optimistic move: one remove + one insert keeps both column counts
+      // (tags derive from list length) and list order in sync immediately.
+      let movedCard = null
+      if (sourceColumnId !== null) {
+        movedCard = cards.value[sourceColumnId].splice(sourceIndex, 1)[0]
+      }
+      if (movedCard) {
+        const targetList = cards.value[targetColumnId]
+        const insertAt = Math.max(0, Math.min(position ?? targetList.length, targetList.length))
+        targetList.splice(insertAt, 0, movedCard)
+      }
+
+      // Persist with retries for transient failures (network errors / 5xx).
+      const res = await withMoveRetry(() => cardApi.move(cardId, targetColumnId, position))
+      const serverCard = res.data
+
+      // Reconcile with the authoritative server result. Positions are shared
+      // across callers, so both entries always end up showing the same values.
+      const targetList = cards.value[targetColumnId]
+      let targetIndex = targetList.findIndex(c => c.id === cardId)
+      if (targetIndex === -1) {
+        // Card was missing from local state (e.g. stale page); trust the server.
+        const insertAt = Math.max(0, Math.min(serverCard.position ?? 0, targetList.length))
+        targetList.splice(insertAt, 0, serverCard)
+        targetIndex = insertAt
+      } else {
+        targetList[targetIndex] = serverCard
+      }
+      // Renumber positions to match array order, mirroring the server-side shift.
+      targetList.forEach((card, i) => { card.position = i })
+      if (sourceColumnId !== null && String(sourceColumnId) !== String(targetColumnId)) {
+        cards.value[sourceColumnId].forEach((card, i) => { card.position = i })
+      }
+      return serverCard
+    } catch (err) {
+      // Failure recovery: restore every column from the snapshot in one place.
+      for (const colId of Object.keys(cards.value)) {
+        if (snapshot[colId] === undefined) {
+          delete cards.value[colId]
+        } else {
+          cards.value[colId] = snapshot[colId]
+        }
+      }
+      throw err
+    }
+  }
+
+  // Retry the move request only on errors that might succeed on a second try.
+  async function withMoveRetry(request, attempt = 1) {
+    const maxAttempts = 3
+    try {
+      return await request()
+    } catch (err) {
+      const status = err.response?.status
+      const retriable = !err.response || (status >= 500 && status < 600)
+      if (!retriable || attempt >= maxAttempts) throw err
+      await new Promise(resolve => setTimeout(resolve, 300 * attempt))
+      return withMoveRetry(request, attempt + 1)
+    }
   }
 
   function clearBoard() {
